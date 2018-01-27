@@ -44,10 +44,12 @@ try:
 except:
     pass 
 
-process_header = ("CPU", "Memory")
+process_header = ("CPU", "Memory", "Write Bytes")
 flows_header = ("Flow", "Bytes", "Packets")
-process_template = "{0:<8}{1:<8}"
+process_template = "{0:<8}{1:<16}{2:<8}"
 flows_template = "{0:<110}{1:<10}{2:<8}"
+
+shell_enabled = False
 
 def option_parser():
 
@@ -55,6 +57,9 @@ def option_parser():
         setattr(parser.values, option.dest, value.split(','))
 
     p = optparse.OptionParser()
+
+    p.add_option("-n", "--host", dest="hostname", default="localhost",
+        type="string", help="Specify the host name.")
 
     p.add_option("-p", "--port", dest="port", default=0,
         type="int", help="Specify the local port.")
@@ -80,7 +85,7 @@ class ConnectionManager (object):
     def send_command(self, command):
         try:
             self.__sock.sendto(command, (self.__host, self.__port))
-            self.__data, server = self.__sock.recvfrom(1024 * 16)
+            self.__data, server = self.__sock.recvfrom(1024 * 1024)
 
             self.__lines = self.__data.split("\n")
             self.__status = "CONNECT"
@@ -174,13 +179,14 @@ def get_process_stats(port):
                         if (n.laddr[1] == port):
                             proc_cpu = proc.cpu_percent()
                             proc_memory = proc.memory_percent()
-                            return proc_cpu, proc_memory
+                            proc_writes = proc.io_counters().write_bytes
+                            return proc_cpu, proc_memory, proc_writes
         except Exception as e:
             pass
 
-    return proc_cpu, proc_memory
+    return proc_cpu, proc_memory, 0
 
-def show_menu(win, conn):
+def show_menu(win, conn, write_disk, shell_enabled):
     win.clear()
     win.border(1)
     win.addstr(1, 2, "AIEngine Administration Console " + time.ctime())
@@ -188,37 +194,59 @@ def show_menu(win, conn):
         win.addstr(1, 60, str(conn.status) , curses.color_pair(1))
     else:
         win.addstr(1, 60, str(conn.status) , curses.color_pair(2))
-    win.addstr(3, 3, "1 - Show HTTP network flows          a - Show HTTP cache   d - Release HTTP cache")
-    win.addstr(4, 3, "2 - Show SSL network flows           b - Show SSL cache    e - Release SSL cache")
-    win.addstr(5, 3, "3 - Show DNS network flows           c - Show DNS cache    f - Release DNS cache")
-    win.addstr(6, 3, "4 - Show TCPGeneric network flows    j - Show TCP IPSet    g - Release TCP traffic")
-    win.addstr(7, 3, "5 - Show UDPGeneric network flows    k - Show UDP IPSet    h - Release UDP traffic")
-    win.addstr(8, 3, "6 - Show Protocol statistics         l - Show TCP Regex    z - Show HTTP Matchs")
-    win.addstr(9, 3, "7 - Show current packet              m - Show UDP Regex    x - Show SSL Matchs")
-    win.addstr(10, 3, "8 - Show Anomalies                   i - Resolve IPs(%d)" % dns.total_items)
-    win.addstr(10, 62, "w - Show DNS Matchs")
+    win.addstr(3, 3, "1 - Show HTTP network flows           a - Show HTTP cache      d - Release HTTP cache")
+    win.addstr(4, 3, "2 - Show SSL network flows            b - Show SSL cache       e - Release SSL cache")
+    win.addstr(5, 3, "3 - Show DNS network flows            c - Show DNS cache       f - Release DNS cache")
+    win.addstr(6, 3, "4 - Show TCPGeneric network flows     j - Show TCP IPSet       g - Release TCP traffic")
+    win.addstr(7, 3, "5 - Show UDPGeneric network flows     k - Show UDP IPSet       h - Release UDP traffic")
+    win.addstr(8, 3, "6 - Show Protocol statistics          l - Show TCP Regex       z - Show HTTP Matchs")
+    win.addstr(9, 3, "7 - Show current packet               m - Show UDP Regex       x - Show SSL Matchs")
+    win.addstr(10, 3, "8 - Show Anomalies                    i - Resolve IPs(%d)" % dns.total_items)
+    win.addstr(10, 62, "    s - Show DNS Matchs")
 
     win.addstr(11, 3, "q - Exit")
+    if (write_disk):
+        win.addstr(11, 40, " w - Write on disk[ON] ")
+    else:
+        win.addstr(11, 40, " w - Write on disk[OFF]")
+
+    if (shell_enabled):
+        win.addstr(11, 65, " v - Shell[ON]")
+    else:
+        win.addstr(11, 65, " v - Shell[OFF]")
+
     win.refresh()
 
 def show_packet_dispatcher_status(win, conn):
     win.clear()
     win.border(1)
 
+    global shell_enabled
+
+    cad = ""
     ln = 2
     conn.send_command("pd.show()")
     for l in conn.lines[1:]:
+        text = l.strip()
+        if (text.startswith("Shell")):
+            cad = text
+            if (text.endswith("enabled")):
+                shell_enabled = True
+            else:
+                shell_enabled = False
+
         win.addstr(ln, 3, l.strip())
         ln += 1
+
     win.refresh()
 
 def show_process_status(win, conn):
     win.clear()
     win.border(1)
 
-    proc_cpu, proc_memory = get_process_stats(3000)
+    proc_cpu, proc_memory, write_bytes = get_process_stats(3000)
 
-    item = (proc_cpu, proc_memory)
+    item = (proc_cpu, proc_memory, write_bytes)
 
     win.addstr(1, 3, process_template.format(*process_header))
     win.addstr(3, 3, process_template.format(*item))
@@ -422,7 +450,7 @@ def show_regex(win, conn, cmd):
         win.addstr(1, 3, conn.lines[0].lstrip())
         ln = 3
         for l in conn.lines[1: y - 3]:
-            win.addstr(ln, 3, l.lstrip().split("Callback")[0])
+            win.addstr(ln, 3, l.lstrip().split("Callback")[0].rstrip())
             ln += 1
     except:
         pass
@@ -430,21 +458,40 @@ def show_regex(win, conn, cmd):
     win.refresh()
 
 def show_tcp_regex(win, conn):
-    show_regex(win, conn, "st.tcp_regex_manager.show()")
+    show_regex(win, conn, "st.tcp_regex_manager.show_matched_regexs()")
 
 def show_udp_regex(win, conn):
-    show_regex(win, conn, "st.udp_regex_manager.show()")
+    show_regex(win, conn, "st.udp_regex_manager.show_matched_regexs()")
 
 def show_http_matchs(win, conn):
-    show_regex(win, conn, "http_names.show()")
+    show_regex(win, conn, "http_names.show_matched_domains()")
 
 def show_ssl_matchs(win, conn):
-    show_regex(win, conn, "ssl_names.show()")
+    show_regex(win, conn, "ssl_names.show_matched_domains()")
 
 def show_dns_matchs(win, conn):
-    show_regex(win, conn, "dns_names.show()")
+    show_regex(win, conn, "dns_names.show_matched_domains()")
+
+def write_on_disk(conn, write):
+
+    if (write):
+        conn.send_command("st.set_tcp_database_adaptor(tcp_files, 32)")
+        conn.send_command("st.set_udp_database_adaptor(udp_files, 32)")
+    else:
+        conn.send_command("st.set_tcp_database_adaptor(None, 32)")
+        conn.send_command("st.set_udp_database_adaptor(None, 32)")
+
+def handle_shell(conn, sw):
+
+    if (sw):
+        conn.send_command("pd.enable_shell = True")
+    else:
+        conn.send_command("pd.enable_shell = False")
+
 
 def curses_main_loop(screen, port):
+
+    global shell_enabled
 
     conn = ConnectionManager("localhost", port)
 
@@ -486,11 +533,11 @@ def curses_main_loop(screen, port):
     process_window.border(1)
 
     """ Create the flows window """
-    flows_window = curses.newwin(y - 16, half_x + (cuarter_x / 2), 15, 1)
+    flows_window = curses.newwin(y - 16, half_x + (cuarter_x / 2) - 4, 15, 1)
     flows_window.border(1)
 
     """ Create the cache window """
-    cache_window = curses.newwin(y - 16, half_x - (cuarter_x/2) - 2, 15, half_x + (cuarter_x/2) + 1)
+    cache_window = curses.newwin(y - 16, half_x - (cuarter_x/2) + 3, 15, half_x + (cuarter_x/2) - 3)
     cache_window.border(1)
 
     md_5seconds = MethodDispatcher()
@@ -512,7 +559,7 @@ def curses_main_loop(screen, port):
     md_10seconds.add_method(ord('m'), show_udp_regex)
     md_10seconds.add_method(ord('z'), show_http_matchs)
     md_10seconds.add_method(ord('x'), show_ssl_matchs)
-    md_10seconds.add_method(ord('w'), show_dns_matchs)
+    md_10seconds.add_method(ord('s'), show_dns_matchs)
 
     md_cache = MethodDispatcher()
     md_cache.add_method(ord('d'), clear_http_cache)
@@ -526,18 +573,19 @@ def curses_main_loop(screen, port):
     screen.refresh()
     menu_window.refresh()
 
-    show_menu(menu_window, conn)
+    show_menu(menu_window, conn, False, False)
     show_packet_dispatcher_status(packet_dispatcher_window, conn)
     show_process_status(process_window, conn)
     user_option = 0
     active_5sec_option = 0
     active_10sec_option = 0
     force_write_screen = False
+    write_flows_on_disk = False
     while user_option != ord('q'):
 
         """ Refresh the menu every 1 second """
         if (current_time - menu_window_refresh > 1):
-            show_menu(menu_window, conn)
+            show_menu(menu_window, conn, write_flows_on_disk, shell_enabled)
             menu_window_refresh = current_time
 
         """ Refresh the options every 2 seconds """
@@ -585,6 +633,13 @@ def curses_main_loop(screen, port):
             
             if (user_option == ord('i')):
                 dns.enable = not dns.enable
+
+            if (user_option == ord('w')):
+                write_flows_on_disk = not write_flows_on_disk
+                write_on_disk(conn, write_flows_on_disk)
+            if (user_option == ord('v')):
+                shell_enabled = not shell_enabled 
+                handle_shell(conn, shell_enabled)
 
             last_user_option = user_option
             force_write_screen = True
